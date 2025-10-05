@@ -1,0 +1,75 @@
+{% extends 'base.html' %}
+
+{% block content %}
+<section class="grid grid-2">
+  <!-- CHAT PANEL -->
+  <div class="card chat">
+    <div class="card-header">
+      <h2>Chatbot</h2>
+      <div class="spacer"></div>
+      <button class="btn" id="btn-history" type="button">Lịch sử</button>
+      <button class="btn" id="btn-new-chat" type="button">Đoạn chat mới</button>
+      <div class="badge" id="mode-badge">Catalog</div>
+    </div>
+
+    <div class="chat-body" id="messages" aria-live="polite">
+      <div class="bubble bot">
+        Xin chào 👋 Bạn có thể tra cứu sách (tên/tác giả/thể loại)
+        hoặc gõ <code>mua "Tên Sách"</code> để đặt hàng.
+      </div>
+    </div>
+
+    <form class="chat-input" id="chat-form" autocomplete="off">
+      <input
+        type="text"
+        id="msg"
+        placeholder="Nhập tin nhắn..."
+        aria-label="Tin nhắn"
+        autofocus
+      />
+      <button class="btn btn-primary" type="submit">Gửi</button>
+    </form>
+  </div>
+
+  <!-- STATUS / SIDEBAR -->
+  <aside class="card">
+    <div class="card-header"><h3>Trạng thái</h3></div>
+    <div class="card-body">
+      <div class="kv">
+        <span>Session:</span> <code id="sid">{{ session_id }}</code>
+      </div>
+      <div class="kv">
+        <span>Realtime:</span> <b id="wsstate">connecting…</b>
+      </div>
+      <hr class="sep" />
+      <p class="muted">
+        Khi admin duyệt/hủy, thông báo sẽ hiện ngay tại cửa sổ chat.
+        Bạn có thể xem lại các cuộc trò chuyện trước trong mục <b>Lịch sử</b>.
+      </p>
+    </div>
+  </aside>
+</section>
+
+<!-- MODAL: LỊCH SỬ SESSION -->
+<div class="modal" id="sessions-modal" aria-hidden="true" role="dialog" aria-label="Lịch sử phiên chat">
+  <div class="modal-backdrop" onclick="closeSessionsModal()"></div>
+  <div class="modal-card" role="document">
+    <div class="card-header between">
+      <h3>Chọn cuộc trò chuyện</h3>
+      <button class="btn" type="button" onclick="closeSessionsModal()" aria-label="Đóng">✕</button>
+    </div>
+    <div class="card-body">
+      <ul id="sessions-list" class="sessions-list"></ul>
+      <p class="muted" id="sessions-empty" style="display:none">Chưa có lịch sử nào.</p>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  // truyền session hiện hành cho JS
+  window.__SESSION_ID__ = "{{ session_id }}";
+</script>
+<script src="/static/js/chat.js" defer></script>
+{% endblock %}

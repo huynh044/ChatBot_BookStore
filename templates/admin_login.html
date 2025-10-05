@@ -1,0 +1,22 @@
+{% extends 'base.html' %}
+{% block content %}
+<section class="max-sm">
+  <div class="card">
+    <div class="card-header"><h2>Đăng nhập Admin</h2></div>
+    <form class="card-body form" id="login-form">
+      <label>Username
+        <input name="username" required>
+      </label>
+      <label>Password
+        <input name="password" type="password" required>
+      </label>
+      <button class="btn btn-primary w-full">Đăng nhập</button>
+      <p class="form-hint" id="login-hint"></p>
+    </form>
+  </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/login.js" defer></script>
+{% endblock %}

@@ -25,8 +25,8 @@ ollama pull llama3.1:8b
 ```
 
 # Step 4: Setup Database
---- Run sql scripts in db folder on Mysql, schema.sql for tables and seed.sql for demo data.
---- Then replace your username and password database in .env.example.
+- Run sql scripts in db folder on Mysql, schema.sql for tables and seed.sql for demo data.
+- Then replace your username and password database in .env.example.
 
 # Step 5:
 Run this command to create data index:

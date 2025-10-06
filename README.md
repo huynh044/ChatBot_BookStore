@@ -8,9 +8,10 @@ This is a minimal, production-minded reference implementation for a BookStore ch
 
 
 ## The steps which setup the project
-# Step 1: Clone project
+# Step 1: Clone project and setup conda env
 ```bash
 git clone https://github.com/huynh044/ChatBot_BookStore.git
+conda env create -f environment.yml
 ```
 
 # Step 2: Download ollama

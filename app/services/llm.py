@@ -1,5 +1,10 @@
+from __future__ import annotations
+
 import os, re, json, httpx, unicodedata
 from ..config import settings
+from typing import Optional, List, Dict, Any
+from pydantic import BaseModel, Field
+from .llm_json import complete_json
 
 ORDER_WORDS = [r"mua", r"đặt", r"mình lấy", r"order", r"mua giúp"]
 CATALOG_WORDS = [r"giá", r"còn không", r"tác giả", r"thể loại", r"tồn", r"bao nhiêu"]
@@ -93,3 +98,58 @@ def parse_catalog_query(text: str) -> dict:
 
     # Query text để search (nếu người dùng có cụm tên sách/tác giả vẫn giữ)
     return {"query": raw.strip(), "category": category}
+
+class NLUOut(BaseModel):
+    intent: str = Field(..., description="search | order | status | smalltalk | unknown")
+    query: Optional[str] = None
+    book_ref: Optional[str] = None   # mô tả thô khách nói (vd: 'Sherlock Holmes Toàn Tập')
+    book_id: Optional[int] = None    # nếu suy ra được từ bối cảnh/last_hits
+    quantity: Optional[int] = None
+    phone: Optional[str] = None
+    address: Optional[str] = None
+    customer_name: Optional[str] = None
+    ask: Optional[str] = None        # nếu còn thiếu, đề xuất câu hỏi ngắn
+
+def nlu_resolve_from_context(
+    user_text: str,
+    recent_dialog: List[Dict[str, str]],
+    last_hits: List[Dict[str, Any]],
+    current_slots: Dict[str, Any],
+) -> dict:
+    """
+    Dùng LLM hiểu ngữ cảnh: xác định intent + slot từ lịch sử & danh sách kết quả gần nhất.
+    Trả JSON chặt chẽ (NLUOut).
+    """
+    system = (
+        "Bạn là NLU cho Bookstore. Nhiệm vụ: từ lịch sử hội thoại, câu nhập mới, và danh sách sách gần nhất "
+        "(last_hits), hãy rút trích intent và các slot. Nếu người dùng nhắc đến một cuốn sách vừa liệt kê "
+        "('cuốn đầu tiên', 'Sherlock Holmes Toàn Tập', 'id 7'...), hãy điền book_id tương ứng. "
+        "Nếu thiếu thông tin để đặt hàng (book_id, quantity, phone, address, customer_name) hãy đề xuất 'ask' ngắn gọn (tiếng Việt). "
+        "Trả về duy nhất JSON đúng schema."
+    )
+    context = {
+        "recent_dialog": recent_dialog,          # [{"role":"user/assistant","content": "..."}]
+        "last_hits": last_hits,                  # [{"book_id", "title", "author", ...}]
+        "current_slots": current_slots or {},    # slot đã biết
+    }
+    schema_hint = {
+        "intent": "search|order|status|smalltalk|unknown",
+        "query?": "string",
+        "book_ref?": "string",
+        "book_id?": "int",
+        "quantity?": "int",
+        "phone?": "string",
+        "address?": "string",
+        "customer_name?": "string",
+        "ask?": "string"
+    }
+    out = complete_json(
+        base_url=getattr(settings, "ollama_base_url", "http://localhost:11434"),
+        model=getattr(settings, "planner_model", "qwen2.5:14b-instruct"),
+        system=system,
+        user=user_text,
+        context=context,
+        schema_hint=schema_hint,
+        schema_model=NLUOut,
+    )
+    return out

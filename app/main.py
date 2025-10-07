@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import re
-import unicodedata
 import uuid
 import anyio
 
@@ -19,13 +17,13 @@ from .db import (
     # Books
     list_books, get_book_by_id, create_book, update_book, delete_book,
     # Orders
-    create_order, list_orders_by_status, approve_order, cancel_order, get_order_session,
+    list_orders_by_status, approve_order, cancel_order, get_order_session,
     # Chat history / sessions
     insert_chat, get_chat_history, ensure_chat_session, list_chat_sessions,
 )
 from .services.state import get_session, reset_session
 from .services.rag import retriever
-from .services.llm import classify_intent, extract_order_entities, QTY_RE, PHONE_RE
+from .services.agent import BookstoreAgent
 from .ws import hub
 
 
@@ -36,6 +34,10 @@ app = FastAPI()
 app.add_middleware(SessionMiddleware, secret_key=settings.secret_key)
 templates = Jinja2Templates(directory="templates")
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+
+# Agent orchestrator
+agent = BookstoreAgent(hub)
 
 
 # -----------------------------------------------------------------------------
@@ -50,54 +52,6 @@ def get_or_create_session_id(request: Request) -> str:
         with db_conn() as conn:
             ensure_chat_session(conn, sid)
     return sid
-
-
-def _norm(text: str) -> str:
-    s = (text or "").strip().lower()
-    s = unicodedata.normalize("NFD", s)
-    s = "".join(ch for ch in s if unicodedata.category(ch) != "Mn")
-    s = re.sub(r"\s+", "", s)
-    return s
-
-
-def _norm_ok(s: str) -> str:
-    s = (s or "").strip().lower()
-    s = unicodedata.normalize("NFD", s)
-    s = "".join(ch for ch in s if unicodedata.category(ch) != "Mn")
-    s = re.sub(r"[^a-z]", "", s)
-    return s
-
-
-_EDIT_TOKENS = {"sua", "doi", "thay", "chinh"}
-
-
-def _is_edit_cmd(text: str) -> bool:
-    n = _norm(text)
-    return any(tok in n for tok in _EDIT_TOKENS)
-
-
-def _which_field(text: str) -> str | None:
-    t = text.lower()
-    n = _norm(text)
-    if "luong" in n or "quyen" in n or "số lượng" in t or "sl" in n:
-        return "quantity"
-    if "sdt" in n or "điện thoại" in t or "so dienthoai" in n:
-        return "phone"
-    if "dia" in n or "địa chỉ" in t:
-        return "address"
-    if ("ten" in n or "tên" in t) and "sách" not in t:
-        return "customer_name"
-    if "sach" in n or "tựa" in t or "tên sách" in t:
-        return "book"
-    return None
-
-
-def _start_new_order_slots(st: dict) -> None:
-    """Khởi tạo order mới: xoá book & quantity; giữ thông tin nhận hàng."""
-    st["slots"]["book_id"] = None
-    st["slots"]["quantity"] = None
-    st["last_prompt"] = None
-    st["state"] = "order_collect"
 
 
 # -----------------------------------------------------------------------------
@@ -120,191 +74,27 @@ def chat_history(session_id: str):
     return {"session_id": session_id, "messages": items}
 
 
-def _reply_and_log(sid: str, reply: str, state: str, data: dict | None = None):
-    with db_conn() as conn:
-        insert_chat(conn, sid, "assistant", reply)
-    return {"session_id": sid, "reply": reply, "state": state, "data": data}
-
-
 @app.post("/api/chat")
 def chat_api(payload: ChatIn, request: Request):
     sid = payload.session_id or get_or_create_session_id(request)
     st = get_session(sid)
     text_in = (payload.message or "").strip()
 
-    # đảm bảo có bản ghi session trong DB
     with db_conn() as conn:
         ensure_chat_session(conn, sid)
         insert_chat(conn, sid, "user", text_in)
 
-    # ---- shortcuts: "mua thêm" khi đang có đơn trước đó
-    norm = _norm(text_in)
-    if any(k in norm for k in ["muathem", "datthem"]):
-        _start_new_order_slots(st)
+    result = agent.handle_message(sid, text_in, st)
 
-    if st["state"] in {"await_admin_decision"} and "mua" in text_in.lower():
-        _start_new_order_slots(st)
-
-    # ---- đang chờ xác nhận: OK / Sửa ...
-    if st["state"] == "await_confirm":
-        token = _norm_ok(text_in)
-
-        # 1) Xác nhận -> tạo đơn
-        if token in {"ok", "oke", "okay", "dongy", "xacnhan"}:
-            slots = st["slots"]
-            payload_sql = {
-                "customer_name": slots["customer_name"],
-                "phone": slots["phone"],
-                "address": slots["address"],
-                "book_id": slots["book_id"],
-                "quantity": slots["quantity"],
-                "session_id": sid,
-            }
-            with db_conn() as conn:
-                order_id = create_order(conn, payload_sql)
-
-            st["state"] = "await_admin_decision"
-            st["last_prompt"] = None
-
-            # Notify admin có đơn mới
-            anyio.from_thread.run(hub.broadcast_admin, {"type": "new_order", "order_id": order_id})
-
-            reply = f"Đã tạo đơn #{order_id} (chờ duyệt). Mình sẽ báo ngay khi Admin duyệt/hủy."
-            return _reply_and_log(sid, reply, "await_admin_decision", {"order_id": order_id})
-
-        # 2) Người dùng muốn SỬA ...
-        if _is_edit_cmd(text_in) or _which_field(text_in):
-            st["state"] = "order_collect"
-            field = _which_field(text_in)
-            if field == "quantity":
-                st["last_prompt"] = "ask_quantity"
-                reply = "Bạn muốn sửa **số lượng** thành bao nhiêu?"
-            elif field == "phone":
-                st["last_prompt"] = "ask_phone"
-                reply = "Bạn gửi lại **SĐT** giúp mình nhé?"
-            elif field == "address":
-                st["last_prompt"] = "ask_address"
-                reply = "Bạn sửa **địa chỉ** như thế nào ạ?"
-            elif field == "customer_name":
-                st["last_prompt"] = "ask_name"
-                reply = "Tên người nhận mới là gì ạ?"
-            elif field == "book":
-                st["last_prompt"] = "ask_new_book"
-                reply = "Bạn muốn đổi sang **sách nào**?"
-            else:
-                st["last_prompt"] = "ask_edit_field"
-                reply = "Bạn muốn sửa gì: **số lượng**, **SĐT**, **địa chỉ**, **tên**, hay **sách**?"
-            return _reply_and_log(sid, reply, st["state"], None)
-
-        # 3) Không hiểu -> lặp lại thẻ xác nhận
-        with db_conn() as conn:
-            b = get_book_by_id(conn, st["slots"]["book_id"])
-        qty = st["slots"]["quantity"]
-        total = (b["price"] * qty) if b else 0
-        reply = (
-            f"Xác nhận đơn:\n• {b['title']} × {qty} – {b['price']:,}đ → Tổng **{total:,}đ**\n"
-            f"Người nhận: {st['slots']['customer_name']} – {st['slots']['phone']}\n"
-            f"Địa chỉ: {st['slots']['address']}\n"
-            f"Gõ **OK** để đặt, hoặc nhập 'Sửa ...' để chỉnh."
-        )
-        return _reply_and_log(sid, reply, "await_confirm", {"book": b, "total": total})
-
-    # ---- Slot-filling / nuốt trả lời theo last_prompt
-    if st["state"] == "order_collect":
-        lp = st.get("last_prompt")
-        if lp == "ask_quantity" and not st["slots"]["quantity"]:
-            m = QTY_RE.search(text_in) or re.search(r"\b(\d+)\b", text_in)
-            if m:
-                st["slots"]["quantity"] = int(m.group(1))
-        elif lp == "ask_phone" and not st["slots"]["phone"]:
-            m = PHONE_RE.search(text_in.replace(" ", ""))
-            if m:
-                st["slots"]["phone"] = m.group(1)
-        elif lp == "ask_address" and not st["slots"]["address"]:
-            if len(text_in) >= 4:
-                st["slots"]["address"] = text_in
-        elif lp == "ask_name" and not st["slots"]["customer_name"]:
-            if len(text_in) >= 2:
-                st["slots"]["customer_name"] = text_in
-        elif lp == "ask_edit_field":
-            field = _which_field(text_in)
-            if field:
-                st["last_prompt"] = {
-                    "quantity": "ask_quantity",
-                    "phone": "ask_phone",
-                    "address": "ask_address",
-                    "customer_name": "ask_name",
-                    "book": "ask_new_book",
-                }[field]
-            else:
-                reply = "Bạn muốn sửa **số lượng**, **SĐT**, **địa chỉ**, **tên**, hay **sách**?"
-                return _reply_and_log(sid, reply, "order_collect", None)
-        elif lp == "ask_new_book":
-            ents = extract_order_entities(text_in)
-            results = retriever.search(ents["title_or_query"], limit=5)
-            if not results:
-                reply = "Mình chưa nhận ra tựa sách mới. Bạn nói rõ tên/tác giả giúp mình nhé?"
-                return _reply_and_log(sid, reply, "order_collect", None)
-            st["slots"]["book_id"] = results[0]["book_id"]
-            st["last_prompt"] = None
-
-    # ---- Router: tra cứu (catalog) vs mua (order)
-    intent = classify_intent(text_in)
-    if intent == "catalog" and st["state"] == "catalog":
-        results = retriever.search(text_in, limit=5)
-        if not results:
-            reply = "Xin lỗi, mình chưa tìm thấy sách phù hợp. Bạn mô tả rõ hơn (tên/tác giả/thể loại)?"
-            return _reply_and_log(sid, reply, "catalog", {"results": []})
-        top = results[:3]
-        lines = [f"• {r['title']} – {r['author']} | {r['price']:,}đ | tồn: {r['stock']}" for r in top]
-        reply = "Mình tìm thấy:\n" + "\n".join(lines) + "\nBạn muốn đặt mua cuốn nào không?"
-        return _reply_and_log(sid, reply, "catalog", {"results": top})
-
-    # ---- Order flow
-    st["state"] = "order_collect"
     with db_conn() as conn:
-        if not st["slots"]["book_id"]:
-            ents = extract_order_entities(text_in)
-            results = retriever.search(ents["title_or_query"], limit=5)
-            if not results:
-                reply = "Mình chưa xác định được tựa sách. Bạn nói rõ tên/tác giả giúp mình nhé?"
-                return _reply_and_log(sid, reply, "order_collect", None)
-            book = results[0]
-            st["slots"]["book_id"] = book["book_id"]
-        else:
-            book = get_book_by_id(conn, st["slots"]["book_id"])
+        insert_chat(conn, sid, "assistant", result.reply)
 
-    if not st["slots"]["quantity"]:
-        st["last_prompt"] = "ask_quantity"
-        reply = f"Bạn muốn mua **{book['title']}** mấy quyển ạ?"
-        return _reply_and_log(sid, reply, "order_collect", {"book": book})
-    if not st["slots"]["phone"]:
-        st["last_prompt"] = "ask_phone"
-        reply = "Cho mình xin **SĐT** liên hệ ạ?"
-        return _reply_and_log(sid, reply, "order_collect", {"book": book})
-    if not st["slots"]["address"]:
-        st["last_prompt"] = "ask_address"
-        reply = "Bạn cho mình **địa chỉ nhận hàng** với ạ?"
-        return _reply_and_log(sid, reply, "order_collect", {"book": book})
-    if not st["slots"]["customer_name"]:
-        st["last_prompt"] = "ask_name"
-        reply = "Tên người nhận là gì ạ?"
-        return _reply_and_log(sid, reply, "order_collect", {"book": book})
-
-    # đủ slot -> xác nhận
-    st["last_prompt"] = None
-    with db_conn() as conn:
-        b = get_book_by_id(conn, st["slots"]["book_id"])
-    qty = st["slots"]["quantity"]
-    total = (b["price"] * qty) if b else 0
-    reply = (
-        f"Xác nhận đơn:\n• {b['title']} × {qty} – {b['price']:,}đ → Tổng **{total:,}đ**\n"
-        f"Người nhận: {st['slots']['customer_name']} – {st['slots']['phone']}\n"
-        f"Địa chỉ: {st['slots']['address']}\n"
-        f"Gõ **OK** để đặt, hoặc nhập 'Sửa ...' để chỉnh."
-    )
-    st["state"] = "await_confirm"
-    return _reply_and_log(sid, reply, "await_confirm", {"book": b, "total": total})
+    return {
+        "session_id": sid,
+        "reply": result.reply,
+        "state": result.state,
+        "data": result.data,
+    }
 
 
 # --- Reset session API (POST + GET cho tiện test) ---

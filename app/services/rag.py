@@ -50,10 +50,7 @@ def _get(name: str, default=None):
 # =================== Embedding qua Ollama ===================
 
 class OllamaEmbeddingFn(EmbeddingFunction):
-    """
-    Tương thích Chroma 0.4.x+: cung cấp name(), embed_documents(), embed_query(), __call__.
-    Ưu tiên /api/embed (mới); fallback /api/embeddings (cũ).
-    """
+
     def __init__(self, model: str, base_url: str = "http://localhost:11434"):
         self.model = model
         self.base_url = (base_url or "http://localhost:11434").rstrip("/")

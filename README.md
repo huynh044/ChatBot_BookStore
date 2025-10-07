@@ -1,4 +1,4 @@
-# BookStore Chatbot (RAG + FastAPI + MySQL + Chroma)
+# BookStore AI Agent (RAG + FastAPI + MySQL + Chroma)
 
 This project is a minimal, production-ready reference implementation of a BookStore AI agent built with FastAPI. It uses a hybrid RAG approach (MySQL FULLTEXT + Chroma vector search) for catalog retrieval, Ollama for embeddings and LLM calls, SQLAlchemy + MySQL for data storage, and Pydantic for schema validation. The bot supports slot-filling order flow with user confirmation and Admin approval, an Admin dashboard for managing books and orders, and WebSocket notifications to push order-status updates to active chat sessions.
 
